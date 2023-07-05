@@ -1,0 +1,162 @@
+version: '3'
+
+services:
+  petcircle-frontend:
+    container_name: petcircle-frontend
+    image: ghcr.io/manuelzanaboni/petcircle-frontend:latest
+    environment:
+      REACT_APP_PETCIRCLE_BACKEND_ADDRESS: http://${HOST}:${BACKEND_PORT}
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT}:${FRONTEND_PORT}"
+
+  petcircle-backend:
+    container_name: petcircle-backend
+    image: ghcr.io/manuelzanaboni/petcircle-backend:latest
+    restart: unless-stopped
+    networks:
+      - petcircle-network
+    depends_on:
+      - petcircle-timescaledb
+      - blockchain-client
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:postgresql://petcircle-timescaledb:${TIMESCALE_INTERNAL_PORT}/petcircle
+      SPRING_DATASOURCE_USERNAME: ${TIMESCALE_USER}
+      SPRING_DATASOURCE_PASSWORD: ${TIMESCALE_PASSWORD}
+      ORION_URL: http://orion:${ORION_PORT}
+      QUANTUMLEAP_URL: http://quantumleap:${QUANTUMLEAP_PORT}
+      BC_KEY: ${BLOCKCHAIN_PRIVATEKEY}
+      BC_CLIENT_URL: http://blockchain-client:${BLOCKCHAIN_PORT}
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+
+  petcircle-timescaledb:
+    container_name: petcircle-timescaledb
+    image: registry.gitlab.com/ttsnetwork/petcircle-timescaledb:latest
+    restart: unless-stopped
+    networks:
+      - petcircle-network
+    volumes:
+      - timescale-db:/var/lib/postgresql/data
+    # expose:
+    #   - ${TIMESCALE_INTERNAL_PORT}
+    ports:
+      - "${TIMESCALE_EXTERNAL_PORT}:${TIMESCALE_INTERNAL_PORT}" # 5435:5432
+
+  blockchain-client:
+    container_name: blockchain-client
+    image: kyklos-docker-dev.artifact.tecnalia.com/kyklos_blockchain_client:1.0
+    restart: unless-stopped
+    networks:
+      - petcircle-network
+    ports:
+      - "${BLOCKCHAIN_PORT}:${BLOCKCHAIN_PORT}"
+
+  # Orion context broker
+  orion:
+    container_name: orion
+    image: fiware/orion:${ORION_VERSION}
+    depends_on:
+      - mongo-db
+    restart: unless-stopped
+    networks:
+      - petcircle-network
+    ports:
+      - "${ORION_PORT}:${ORION_PORT}" # ${HOST}:1026
+    command: -dbhost mongo-db -logLevel DEBUG -noCache
+  #    healthcheck:
+  #      test: curl --fail -s http://orion:${ORION_PORT}/version || exit 1
+  #      interval: 5s
+
+  # Quantum Leap is persisting Short Term History to TimescaleDB
+  quantumleap:
+    container_name: quantumleap
+    image: orchestracities/quantumleap:${QUANTUMLEAP_VERSION}
+    expose:
+      - "${QUANTUMLEAP_PORT}"
+    # ports:
+    #   - "${QUANTUMLEAP_PORT}:${QUANTUMLEAP_PORT}"
+    depends_on:
+      - petcircle-timescaledb
+      - redis-db
+    restart: unless-stopped
+    environment:
+      WQ_OFFLOAD_WORK: "true"
+      QL_DEFAULT_DB: timescale
+      POSTGRES_HOST: petcircle-timescaledb
+      POSTGRES_PORT: ${TIMESCALE_INTERNAL_PORT}
+      POSTGRES_DB_NAME: ${TIMESCALE_DATABASE}
+      POSTGRES_DB_USER: ${TIMESCALE_USER}
+      POSTGRES_DB_PASS: ${TIMESCALE_PASSWORD}
+      REDIS_HOST: redis-db
+      REDIS_PORT: ${REDIS_PORT}
+      LOGLEVEL: INFO
+    networks:
+      - petcircle-network
+  #    healthcheck:
+  #      test: curl --fail -s http://quantumleap:${QUANTUMLEAP_PORT}/version || exit 1
+
+  quantumleap-wq:
+    image: orchestracities/quantumleap:${QUANTUMLEAP_VERSION}
+    container_name: quantumleap-wq
+    depends_on:
+      - petcircle-timescaledb
+      - redis-db
+    restart: unless-stopped
+    environment:
+      WQ_WORKERS: 1
+      WQ_RECOVER_FROM_ENQUEUEING_FAILURE: "true"
+      WQ_MAX_RETRIES: 5
+      QL_DEFAULT_DB: timescale
+      POSTGRES_HOST: petcircle-timescaledb
+      POSTGRES_PORT: ${TIMESCALE_INTERNAL_PORT}
+      POSTGRES_DB_NAME: ${TIMESCALE_DATABASE}
+      POSTGRES_DB_USER: ${TIMESCALE_USER}
+      POSTGRES_DB_PASS: ${TIMESCALE_PASSWORD}
+      REDIS_HOST: redis-db
+      REDIS_PORT: ${REDIS_PORT}
+      LOGLEVEL: DEBUG
+    networks:
+      - petcircle-network
+    entrypoint: supervisord -n -c ./wq/supervisord.conf # IMPORTANT!!
+
+  # Database
+  mongo-db:
+    image: mongo:${MONGO_DB_VERSION}
+    container_name: mongo-db
+    expose:
+      - "${MONGO_DB_PORT}"
+    restart: unless-stopped
+    # ports:
+    #   - "${MONGO_DB_PORT}:${MONGO_DB_PORT}" # ${HOST}:27017
+    networks:
+      - petcircle-network
+    volumes:
+      - mongo-db:/data
+  #    healthcheck:
+  #      test: |
+  #        host=`hostname --ip-address || echo '${HOST}'`;
+  #        mongo --quiet $host/test --eval 'quit(db.runCommand({ ping: 1 }).ok ? 0 : 2)' && echo 0 || echo 1
+  #      interval: 5s
+
+  redis-db:
+    image: redis:${REDIS_VERSION}
+    container_name: redis-db
+    networks:
+      - petcircle-network
+    restart: unless-stopped
+    expose:
+      - "${REDIS_PORT}"
+#    ports:
+#      - "${REDIS_PORT}:${REDIS_PORT}" # ${HOST}:6379
+    volumes:
+      - redis-db:/data
+
+networks:
+  petcircle-network:
+
+volumes:
+  timescale-db:
+  mongo-db:
+  redis-db:
